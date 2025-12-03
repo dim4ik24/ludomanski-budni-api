@@ -100,6 +100,10 @@ async function pandaGet(endpoint, params = {}) {
     throw err;
   }
 }
+app.use((req, res, next) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    next();
+});
 
 // ---------------- ROOT ----------------
 app.get('/', (req, res) => {
