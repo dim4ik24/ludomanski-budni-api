@@ -49,7 +49,7 @@ const PORT = process.env.PORT || 3000;
 // ---------------- API KEYS ----------------
 // На Render вони беруться з Environment Variables
 // Локально можеш або задати їх через ENV, або лишити fallback
-const API_SPORTS_KEY   = process.env.API_SPORTS_KEY   || 'a17a08235c3affd1f43f31e35e184f9a';
+const API_SPORTS_KEY   = process.env.API_SPORTS_KEY   || 'c330a429cd2fb77c1fbfc2d0cb388b2d';
 const PANDASCORE_TOKEN = process.env.PANDASCORE_TOKEN || '4E8MUrCTQj-Oz2NwoLT8sbQ-mSxUK1vsLgawW7QCeBi7gja0lM4';
 
 // ---------------- HELPERS ----------------
