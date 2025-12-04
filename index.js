@@ -49,7 +49,7 @@ const PORT = process.env.PORT || 3000;
 // ---------------- API KEYS ----------------
 // На Render вони беруться з Environment Variables
 // Локально можеш або задати їх через ENV, або лишити fallback
-const API_SPORTS_KEY   = process.env.API_SPORTS_KEY   || 'a17a08235c3affd1f43f31e35e184f9a';
+const API_SPORTS_KEY   = process.env.API_SPORTS_KEY   || 'c330a429cd2fb77c1fbfc2d0cb388b2d';
 const PANDASCORE_TOKEN = process.env.PANDASCORE_TOKEN || '4E8MUrCTQj-Oz2NwoLT8sbQ-mSxUK1vsLgawW7QCeBi7gja0lM4';
 
 // ---------------- HELPERS ----------------
@@ -100,10 +100,6 @@ async function pandaGet(endpoint, params = {}) {
     throw err;
   }
 }
-app.use((req, res, next) => {
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-    next();
-});
 
 // ---------------- ROOT ----------------
 app.get('/', (req, res) => {
@@ -121,6 +117,11 @@ app.get('/', (req, res) => {
       'cs2'
     ]
   });
+});
+
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  next();
 });
 
 // ---------------- FOOTBALL ----------------
@@ -590,33 +591,139 @@ app.get('/api/formula1/live', async (req, res) => {
 });
 
 // ---------------- CS2 ----------------
+
+// UPCOMING CS2 (з картами)
 app.get('/api/cs2/upcoming', async (req, res) => {
   try {
     const data = await pandaGet('/csgo/matches/upcoming', {
       per_page: 40,
-      sort: 'begin_at'
+      sort: 'begin_at',
+      include: 'games'      // ✅ беремо карти
     });
 
     console.log('✅ CS2 upcoming:', Array.isArray(data) ? data.length : 0);
     res.json({ response: Array.isArray(data) ? data : [] });
   } catch (e) {
-    console.error('❌ CS2 upcoming error');
+    console.error('❌ CS2 upcoming error', e.response?.status, e.response?.data || e.message);
     res.status(500).json({ error: 'CS2 upcoming error', response: [] });
   }
 });
 
+// LIVE CS2 (з картами)
 app.get('/api/cs2/live', async (req, res) => {
   try {
-    const data = await pandaGet('/csgo/matches/running', {
+    const liveData = await pandaGet('/csgo/matches/running', {
       per_page: 20,
-      sort: 'begin_at'
+      sort: 'begin_at',
+      include: 'games'      // ✅ карти для live
     });
 
-    console.log('✅ CS2 live:', Array.isArray(data) ? data.length : 0);
-    res.json({ response: Array.isArray(data) ? data : [] });
+    console.log('✅ CS2 live:', Array.isArray(liveData) ? liveData.length : 0);
+    res.json({ response: Array.isArray(liveData) ? liveData : [] });
   } catch (e) {
-    console.error('❌ CS2 live error');
+    console.error('❌ CS2 live error', e.response?.status, e.response?.data || e.message);
     res.status(500).json({ error: 'CS2 live error', response: [] });
+  }
+});
+
+// одиночний матч CS2 по id (для фінального результату ставок)
+app.get('/api/cs2/match', async (req, res) => {
+  const { id } = req.query;
+  if (!id) {
+    return res.status(400).json({ error: 'match id is required', response: [] });
+  }
+
+  try {
+    // /csgo/matches/:id — стандартний матч у PandaScore
+    const data = await pandaGet(`/csgo/matches/${id}`, {
+      include: 'games'   // можна теж тягнути карти, якщо треба
+    });
+
+    // На фронті ти чекаєш json.response[0], тому загортаємо в такий формат
+    const resp = Array.isArray(data) ? data : [data];
+    console.log('✅ CS2 match by id:', id);
+    res.json({ response: resp });
+  } catch (e) {
+    console.error('❌ CS2 match error', id, e.response?.status, e.response?.data || e.message);
+    res.status(500).json({ error: 'CS2 match error', response: [] });
+  }
+});
+
+// ---- BASKETBALL: матч по id ----
+app.get('/api/basketball/game', async (req, res) => {
+  const { id } = req.query;
+  if (!id) {
+    return res.status(400).json({ error: 'game id is required', response: [] });
+  }
+
+  try {
+    const data = await apiSportsGet(
+      'https://v1.basketball.api-sports.io',
+      '/games',
+      {
+        id,
+        timezone: 'Europe/Kiev'
+      }
+    );
+
+    const resp = Array.isArray(data.response) ? data.response : [];
+    console.log('✅ basketball game by id:', id, '=>', resp.length);
+    res.json({ response: resp });
+  } catch (e) {
+    console.error('❌ basketball game error', id, e.response?.status, e.response?.data || e.message);
+    res.status(500).json({ error: 'basketball game error', response: [] });
+  }
+});
+
+// ---- VOLLEYBALL: матч по id ----
+app.get('/api/volleyball/match', async (req, res) => {
+  const { id } = req.query;
+  if (!id) {
+    return res.status(400).json({ error: 'match id is required', response: [] });
+  }
+
+  try {
+    const data = await apiSportsGet(
+      'https://v1.volleyball.api-sports.io',
+      '/games',
+      {
+        id,
+        timezone: 'Europe/Kiev'
+      }
+    );
+
+    const resp = Array.isArray(data.response) ? data.response : [];
+    console.log('✅ volleyball match by id:', id, '=>', resp.length);
+    res.json({ response: resp });
+  } catch (e) {
+    console.error('❌ volleyball match error', id, e.response?.status, e.response?.data || e.message);
+    res.status(500).json({ error: 'volleyball match error', response: [] });
+  }
+});
+
+// ---- HOCKEY: матч по id ----
+app.get('/api/hockey/match', async (req, res) => {
+  const { id } = req.query;
+  if (!id) {
+    return res.status(400).json({ error: 'match id is required', response: [] });
+  }
+
+  try {
+    const data = await apiSportsGet(
+      'https://v1.hockey.api-sports.io',
+      '/games',
+      {
+        id,
+        timezone: 'Europe/Kiev'
+      }
+    );
+
+    const resp = Array.isArray(data.response) ? data.response : [];
+    console.log('✅ hockey match by id:', id, '=>', resp.length);
+    res.json({ response: resp });
+  } catch (e) {
+    console.error('❌ hockey match error', id, e.response?.status, e.response?.data || e.message);
+    res.status(500).json({ error: 'hockey match error', response: [] });
   }
 });
 
