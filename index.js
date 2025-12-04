@@ -49,7 +49,7 @@ const PORT = process.env.PORT || 3000;
 // ---------------- API KEYS ----------------
 // На Render вони беруться з Environment Variables
 // Локально можеш або задати їх через ENV, або лишити fallback
-const API_SPORTS_KEY   = process.env.API_SPORTS_KEY   || 'c330a429cd2fb77c1fbfc2d0cb388b2d';
+const API_SPORTS_KEY   = process.env.API_SPORTS_KEY   || 'a17a08235c3affd1f43f31e35e184f9a';
 const PANDASCORE_TOKEN = process.env.PANDASCORE_TOKEN || '4E8MUrCTQj-Oz2NwoLT8sbQ-mSxUK1vsLgawW7QCeBi7gja0lM4';
 
 // ---------------- HELPERS ----------------
@@ -609,6 +609,47 @@ app.get('/api/cs2/upcoming', async (req, res) => {
   }
 });
 
+// ================= CS2 outcome helper =================
+function getCs2Outcome(match, selection) {
+  // selection: 'home' або 'away'
+  const rawStatus = (match.status || '').toString().toLowerCase();
+
+  const finishedStatuses = ['finished', 'ended', 'completed', 'closed'];
+  const isFinished = finishedStatuses.some(s => rawStatus.includes(s));
+
+  // матч ще не закінчився
+  if (!isFinished) {
+    return { finished: false };
+  }
+
+  const opps = match.opponents || [];
+  const home = opps[0]?.opponent;
+  const away = opps[1]?.opponent;
+
+  const winnerId =
+    match.winner_id ||
+    match.winner?.id ||
+    match.winner?.opponent_id ||
+    null;
+
+  let winnerSide = null;
+  if (winnerId && home && home.id === winnerId) winnerSide = 'home';
+  if (winnerId && away && away.id === winnerId) winnerSide = 'away';
+
+  // якщо немає winner → повернення
+  if (!winnerSide) {
+    return { finished: true, result: 'refund' };
+  }
+
+  if (selection === winnerSide) {
+    return { finished: true, result: 'win' };
+  } else {
+    return { finished: true, result: 'lose' };
+  }
+}
+
+
+
 // LIVE CS2 (з картами)
 app.get('/api/cs2/live', async (req, res) => {
   try {
@@ -646,6 +687,82 @@ app.get('/api/cs2/match', async (req, res) => {
   } catch (e) {
     console.error('❌ CS2 match error', id, e.response?.status, e.response?.data || e.message);
     res.status(500).json({ error: 'CS2 match error', response: [] });
+  }
+});
+
+// ---- SETTLE CS2 BET (win/lose/refund) ----
+app.post('/api/bets/settle-cs2', async (req, res) => {
+  try {
+    const { betId } = req.body;
+    if (!betId) {
+      return res.status(400).json({ error: 'betId is required' });
+    }
+
+    const betRef = db.collection('bets').doc(betId);
+    const betSnap = await betRef.get();
+
+    if (!betSnap.exists) {
+      return res.status(404).json({ error: 'Bet not found' });
+    }
+
+    const bet = betSnap.data();
+
+    // захист: рахуємо тільки CS2 і тільки pending
+    if (bet.status !== 'pending' || bet.sport !== 'cs2') {
+      return res.json({ ok: true, skipped: true });
+    }
+
+    // тягнемо матч з Panda через наш проксі
+    const matchData = await pandaGet(`/csgo/matches/${bet.eventId}`, {
+      include: 'opponents'
+    });
+    const match = Array.isArray(matchData) ? matchData[0] : matchData;
+
+    if (!match) {
+      return res.status(500).json({ error: 'no match data from PandaScore' });
+    }
+
+    const outcome = getCs2Outcome(match, bet.selection);
+
+    // ще не закінчився – нічого не робимо
+    if (!outcome.finished) {
+      return res.json({ ok: true, notFinished: true });
+    }
+
+    // тут вже точно finished → оновлюємо ставку + баланс
+    const userRef = db.collection('users').doc(bet.userId);
+
+    await db.runTransaction(async (t) => {
+      const betSnap2 = await t.get(betRef);
+      if (!betSnap2.exists) throw new Error('Bet not found in tx');
+
+      const betInside = betSnap2.data();
+      if (betInside.status !== 'pending') {
+        // хтось інший вже порахував
+        return;
+      }
+
+      if (outcome.result === 'win') {
+        t.update(betRef, { status: 'won' });
+        t.update(userRef, {
+          balance: admin.firestore.FieldValue.increment(bet.potentialWin),
+          coins:   admin.firestore.FieldValue.increment(bet.potentialWin)
+        });
+      } else if (outcome.result === 'lose') {
+        t.update(betRef, { status: 'lost' });
+      } else if (outcome.result === 'refund') {
+        t.update(betRef, { status: 'refunded' });
+        t.update(userRef, {
+          balance: admin.firestore.FieldValue.increment(bet.stake),
+          coins:   admin.firestore.FieldValue.increment(bet.stake)
+        });
+      }
+    });
+
+    res.json({ ok: true, result: 'settled', outcome: outcome.result });
+  } catch (e) {
+    console.error('❌ settle cs2 bet error', e);
+    res.status(500).json({ error: 'settle cs2 bet error' });
   }
 });
 
@@ -855,6 +972,60 @@ app.get('/api/bets/my', async (req, res) => {
     res.status(500).json({ error: 'get user bets server error', bets: [] });
   }
 });
+
+async function checkAndSettleCs2Bet(bet) {
+  if (bet.sport !== 'cs2' || bet.status !== 'pending') return;
+
+  try {
+    // 1) дивимось матч
+    const matchRes = await fetch(`/api/cs2/match?id=${bet.eventId}`);
+    const matchJson = await matchRes.json();
+    const match = matchJson.response && matchJson.response[0];
+
+    if (!match) return;
+
+    const statusRaw = (match.status || '').toString().toLowerCase();
+    const finishedStatuses = ['finished', 'ended', 'completed', 'closed'];
+    const isFinished = finishedStatuses.some(s => statusRaw.includes(s));
+
+    if (!isFinished) {
+      // ще грають – нічого не робимо
+      return;
+    }
+
+    // 2) матч закінчився → просимо бекенд розрахувати
+    await fetch('/api/bets/settle-cs2', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ betId: bet.id })
+    });
+
+  } catch (e) {
+    console.error('checkAndSettleCs2Bet error', e);
+  }
+}
+
+async function loadMyBetsAndSettleCs2(userId) {
+  // 1) тягнемо ставки
+  const res = await fetch(`/api/bets/my?userId=${userId}`);
+  const json = await res.json();
+  const bets = json.bets || [];
+
+  // 2) для всіх CS2 pending перевіряємо/розраховуємо
+  for (const bet of bets) {
+    if (bet.sport === 'cs2' && bet.status === 'pending') {
+      await checkAndSettleCs2Bet(bet);
+    }
+  }
+
+  // 3) ще раз тягнемо, щоб уже побачити оновлені статуси/баланс
+  const res2 = await fetch(`/api/bets/my?userId=${userId}`);
+  const json2 = await res2.json();
+  const betsFinal = json2.bets || [];
+
+  // 4) тут викличи свій рендер списку
+  renderBets(betsFinal);
+}
 
 // ---------------- START SERVER ----------------
 app.listen(PORT, () => {
